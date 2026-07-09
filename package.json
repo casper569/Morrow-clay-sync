@@ -1,0 +1,13 @@
+{
+  "name": "morrow-lemlist-report-mail",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mailt het Lemlist-rapport (huisstijl-PDF) dagelijks en wekelijks.",
+  "scripts": {
+    "daily": "PERIOD=daily node report-mail.js",
+    "weekly": "PERIOD=weekly node report-mail.js"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0"
+  }
+}
