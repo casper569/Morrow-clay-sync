@@ -169,7 +169,7 @@ async function metrics(win) {
   if (G[mk]) {
     const g = G[mk];
     const w = await windowCounts(gFrom, gTo, users, campMap);
-    goals = { month: monthIdx, dayNow, daysInMonth, paceFrac,
+    goals = { month: monthIdx, dayNow, daysInMonth, paceFrac, retro: PERIOD === 'monthly',
       contacten: g.contacten, response: g.response, positief: g.positief, deliverability: g.deliverability,
       mtd: { contacten: w.sent, response: w.sent ? 100 * w.uniek / w.sent : 0, positief: w.sent ? 100 * w.positief / w.sent : 0, deliverability: w.sent ? 100 - 100 * w.bounced / w.sent : 0 } };
   }
@@ -202,19 +202,21 @@ table.data{width:100%;border-collapse:collapse;font-size:10.5px}table.data td{pa
 function nf(n) { return Number(n).toLocaleString('nl-NL'); }
 function pct(n, d) { return d ? (100 * n / d).toFixed(1).replace('.', ',') : '0'; }
 const MAAND = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
-function goalBar(label, cur, goal, isPct, dayFrac, isVolume) {
+function goalBar(label, cur, goal, isPct, dayFrac, isVolume, retro) {
   if (goal == null || !(goal > 0)) return '';
   const fill = Math.min(100, Math.round(cur / goal * 100));
   const fmt = (v) => isPct ? (Math.round(v * 10) / 10).toString().replace('.', ',') + '%' : nf(Math.round(v));
   // verwacht nu: volume-doel loopt op met de maand; rate-doel is constant het doel
-  const expected = isVolume ? goal * (dayFrac ?? 1) : goal;
+  const expected = retro ? goal : (isVolume ? goal * (dayFrac ?? 1) : goal);
   const ratio = cur / (expected > 0 ? expected : goal);
   const cls = ratio >= 1 ? '' : (ratio >= 0.85 ? 'warn' : 'bad');
-  const status = ratio >= 1 ? 'op schema' : (ratio >= 0.85 ? 'net achter' : 'achter');
-  const marker = isVolume ? `<span class="pace" style="left:${Math.min(100, Math.round((dayFrac ?? 1) * 100))}%"></span>` : '';
+  const caption = retro
+    ? `doel: ${fmt(goal)} · ${ratio >= 1 ? 'gehaald' : 'niet gehaald'}`
+    : `verwacht nu: ${fmt(expected)} · ${ratio >= 1 ? 'op schema' : (ratio >= 0.85 ? 'net achter' : 'achter')}`;
+  const marker = (!retro && isVolume) ? `<span class="pace" style="left:${Math.min(100, Math.round((dayFrac ?? 1) * 100))}%"></span>` : '';
   return `<div class="goal"><div class="grow">${label} <b>${fmt(cur)} / ${fmt(goal)}</b></div>
     <div class="prog"><span class="${cls}" style="width:${fill}%"></span>${marker}</div>
-    <div class="gsub">verwacht nu: ${fmt(expected)} · ${status}</div></div>`;
+    <div class="gsub">${caption}</div></div>`;
 }
 function trend(val, avg, goodUp) {
   if (avg == null || !(avg > 0)) return '<div class="delta flat">&nbsp;</div>';
@@ -286,16 +288,16 @@ function reportHtml(m, win) {
       </div></td>
     </tr></table>
 
-    ${m.goals ? `<div class="card"><div class="ctitle">Maanddoelen · ${MAAND[m.goals.month]}</div>
-      <div class="csub">Maand-tot-nu vs. je doel voor deze maand${m.goals.paceFrac != null ? ` · dag ${m.goals.dayNow} van ${m.goals.daysInMonth} (paars streepje = verwachte stand nu)` : ''}</div>
+    ${m.goals ? `<div class="card"><div class="ctitle">Maanddoelen · ${MAAND[m.goals.month]}${m.goals.retro ? ' · terugblik' : ''}</div>
+      <div class="csub">${m.goals.retro ? 'Eindstand van de maand vs. je doel' : `Maand-tot-nu vs. je doel voor deze maand · dag ${m.goals.dayNow} van ${m.goals.daysInMonth} (paars streepje = verwachte stand nu)`}</div>
       <table class="cols"><tr>
         <td>
-          ${goalBar('Contacten gemaild', m.goals.mtd.contacten, m.goals.contacten, false, m.goals.paceFrac, true)}
-          ${goalBar('Positieve reacties', m.goals.mtd.positief, m.goals.positief, true, null, false)}
+          ${goalBar('Contacten gemaild', m.goals.mtd.contacten, m.goals.contacten, false, m.goals.paceFrac, true, m.goals.retro)}
+          ${goalBar('Positieve reacties', m.goals.mtd.positief, m.goals.positief, true, null, false, m.goals.retro)}
         </td>
         <td>
-          ${goalBar('Response rate', m.goals.mtd.response, m.goals.response, true, null, false)}
-          ${goalBar('Deliverability', m.goals.mtd.deliverability, m.goals.deliverability, true, null, false)}
+          ${goalBar('Response rate', m.goals.mtd.response, m.goals.response, true, null, false, m.goals.retro)}
+          ${goalBar('Deliverability', m.goals.mtd.deliverability, m.goals.deliverability, true, null, false, m.goals.retro)}
         </td>
       </tr></table>
     </div>` : ''}
