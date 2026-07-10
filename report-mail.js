@@ -3,20 +3,24 @@
  *   PERIOD=daily  -> "gisteren"      (dagelijkse mail)
  *   PERIOD=weekly -> "vorige week"   (wekelijkse mail, ma–zo)
  * Bouwt de opgemaakte HTML -> PDF (headless Chromium), hangt 'm als bijlage, en zet
- * de "Hé boss…"-tekst + Aandachtspunten in de body. Verstuurt via het Gmail-service-account
- * (GOOGLE_SA_KEY, zelfde als je offertebouwer).
+ * de "Hé boss…"-tekst + Aandachtspunten in de body. Verstuurt via SMTP (nodemailer) —
+ * werkt met elk mailaccount met een app-wachtwoord of met een gratis maildienst.
  *
- * Env: LEMLIST_API_KEY, GOOGLE_SA_KEY, MAIL_TO(=casper@), MAIL_FROM(=MAIL_TO), PERIOD(daily|weekly),
+ * Env: LEMLIST_API_KEY, SMTP_USER, SMTP_PASS, SMTP_HOST(=smtp.gmail.com), SMTP_PORT(=465),
+ *      MAIL_FROM(=SMTP_USER), MAIL_TO(=MAIL_FROM), PERIOD(daily|weekly),
  *      AMS_OFFSET(=+02:00, zomertijd; winter +01:00), DRY_RUN.
- * Deps: puppeteer (zie package.json).
+ * Deps: puppeteer + nodemailer (zie package.json).
  */
 const fs = require('fs');
-const crypto = require('node:crypto');
 
 const LEMLIST_BASE = 'https://api.lemlist.com/api';
 const KEY = process.env.LEMLIST_API_KEY;
-const MAIL_TO = process.env.MAIL_TO || 'casper@wearemorrow.nl';
-const MAIL_FROM = process.env.MAIL_FROM || MAIL_TO;
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+const SMTP_PORT = +(process.env.SMTP_PORT || 465);
+const SMTP_USER = process.env.SMTP_USER || '';
+const SMTP_PASS = process.env.SMTP_PASS || '';
+const MAIL_FROM = process.env.MAIL_FROM || SMTP_USER;
+const MAIL_TO = process.env.MAIL_TO || MAIL_FROM;
 const PERIOD = (process.env.PERIOD || 'daily').toLowerCase();
 const OFF = process.env.AMS_OFFSET || '+02:00';
 const DRY = !!process.env.DRY_RUN;
@@ -230,31 +234,14 @@ function aandachtspunten(m) {
   return p;
 }
 
-// ---- Gmail-verzending met bijlage (zelfde methode als offertebouwer) ----
-const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-function parseSA() {
-  let raw = (process.env.GOOGLE_SA_KEY || '').trim();
-  if (raw.length > 1 && ((raw[0] === '"' && raw.endsWith('"')) || (raw[0] === "'" && raw.endsWith("'")))) raw = raw.slice(1, -1).trim();
-  try { return JSON.parse(raw); }
-  catch (e) { throw new Error(`GOOGLE_SA_KEY is geen geldige JSON (lengte ${raw.length}, begint met "${raw.slice(0, 8)}"). Plak de VOLLEDIGE service-account-JSON, van { t/m }, zonder tekst of aanhalingstekens eromheen.`); }
-}
+// ---- Verzending via SMTP met bijlage (app-wachtwoord of maildienst-sleutel) ----
 async function gmailSend({ from, to, subject, html, attachment }) {
-  const sa = parseSA();
-  const now = Math.floor(Date.now() / 1000);
-  const hdr = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
-  const clm = b64url(JSON.stringify({ iss: sa.client_email, sub: from, scope: 'https://www.googleapis.com/auth/gmail.send', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 }));
-  const input = `${hdr}.${clm}`;
-  const sig = b64url(crypto.sign('RSA-SHA256', Buffer.from(input), sa.private_key));
-  const tok = await (await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: `${input}.${sig}` }) })).json();
-  if (!tok.access_token) throw new Error('Geen access_token: ' + JSON.stringify(tok).slice(0, 200));
-  const bnd = `mix_${crypto.randomBytes(8).toString('hex')}`;
-  const parts = [
-    `From: ${from}`, `To: ${to}`, `Subject: =?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`, 'MIME-Version: 1.0',
-    `Content-Type: multipart/mixed; boundary="${bnd}"`, '', `--${bnd}`, 'Content-Type: text/html; charset=UTF-8', '', html,
-    `--${bnd}`, `Content-Type: application/pdf; name="${attachment.filename}"`, 'Content-Transfer-Encoding: base64', `Content-Disposition: attachment; filename="${attachment.filename}"`, '', attachment.base64.replace(/(.{76})/g, '$1\r\n'), `--${bnd}--`,
-  ].join('\r\n');
-  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', { method: 'POST', headers: { Authorization: `Bearer ${tok.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ raw: b64url(Buffer.from(parts, 'utf8')) }) });
-  if (!res.ok) throw new Error(`Gmail send ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const nodemailer = require('nodemailer');
+  const transport = nodemailer.createTransport({ host: SMTP_HOST, port: SMTP_PORT, secure: SMTP_PORT === 465, auth: { user: SMTP_USER, pass: SMTP_PASS } });
+  await transport.sendMail({
+    from, to, subject, html,
+    attachments: [{ filename: attachment.filename, content: attachment.buffer, contentType: 'application/pdf' }],
+  });
 }
 
 async function main() {
@@ -273,8 +260,8 @@ async function main() {
     <ul>${punten.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
     <p style="color:#999;font-size:12px;margin-top:22px;">Automatisch · Morrow.</p></div>`;
 
-  if (DRY || !process.env.GOOGLE_SA_KEY) { fs.writeFileSync(fname, pdf); console.log(`(DRY of geen GOOGLE_SA_KEY) — PDF lokaal opgeslagen als ${fname}, geen mail.`); return; }
-  await gmailSend({ from: MAIL_FROM, to: MAIL_TO, subject: `Lemlist ${PERIOD === 'weekly' ? 'weekrapport' : 'dagrapport'} — ${win.label}`, html: body, attachment: { filename: fname, base64: Buffer.from(pdf).toString('base64') } });
+  if (DRY || !SMTP_PASS) { fs.writeFileSync(fname, pdf); console.log(`(DRY of geen SMTP_PASS) — PDF lokaal opgeslagen als ${fname}, geen mail.`); return; }
+  await gmailSend({ from: MAIL_FROM, to: MAIL_TO, subject: `Lemlist ${PERIOD === 'weekly' ? 'weekrapport' : 'dagrapport'} — ${win.label}`, html: body, attachment: { filename: fname, buffer: Buffer.from(pdf) } });
   console.log(`Mail met bijlage verstuurd naar ${MAIL_TO}.`);
 }
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
