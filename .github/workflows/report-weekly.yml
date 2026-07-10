@@ -28,7 +28,7 @@ jobs:
           PERIOD: weekly
           LEMLIST_API_KEY: ${{ secrets.LEMLIST_API_KEY }}
           SMTP_USER: reports.morrow@gmail.com
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_PASS: ${{ secrets.SMPT_PASS }}
           MAIL_FROM: reports.morrow@gmail.com
           MAIL_TO: "casper@wearemorrow.nl, joris@wearemorrow.nl"
           AMS_OFFSET: "+02:00"     # zomertijd; zet op +01:00 in de winter
