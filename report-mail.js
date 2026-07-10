@@ -232,8 +232,14 @@ function aandachtspunten(m) {
 
 // ---- Gmail-verzending met bijlage (zelfde methode als offertebouwer) ----
 const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+function parseSA() {
+  let raw = (process.env.GOOGLE_SA_KEY || '').trim();
+  if (raw.length > 1 && ((raw[0] === '"' && raw.endsWith('"')) || (raw[0] === "'" && raw.endsWith("'")))) raw = raw.slice(1, -1).trim();
+  try { return JSON.parse(raw); }
+  catch (e) { throw new Error(`GOOGLE_SA_KEY is geen geldige JSON (lengte ${raw.length}, begint met "${raw.slice(0, 8)}"). Plak de VOLLEDIGE service-account-JSON, van { t/m }, zonder tekst of aanhalingstekens eromheen.`); }
+}
 async function gmailSend({ from, to, subject, html, attachment }) {
-  const sa = JSON.parse(process.env.GOOGLE_SA_KEY || '');
+  const sa = parseSA();
   const now = Math.floor(Date.now() / 1000);
   const hdr = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
   const clm = b64url(JSON.stringify({ iss: sa.client_email, sub: from, scope: 'https://www.googleapis.com/auth/gmail.send', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 }));
