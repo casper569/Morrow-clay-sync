@@ -1,0 +1,41 @@
+name: HubSpot weekrapport (mail)
+on:
+  schedule:
+    - cron: "0 6 * * 1"          # elke maandag 06:00 UTC ≈ 08:00 Amsterdam
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Alleen bouwen, geen mail (test) — PDF komt als artifact"
+        type: boolean
+        default: false
+jobs:
+  mail:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-${{ runner.os }}
+      - run: npm install --no-audit --no-fund
+      - name: Bouw en mail HubSpot-weekrapport
+        run: node hubspot-report.js
+        env:
+          PERIOD: weekly
+          HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
+          SMTP_USER: reports.morrow@gmail.com
+          SMTP_PASS: ${{ secrets.SMPT_PASS }}
+          MAIL_FROM: reports.morrow@gmail.com
+          MAIL_TO: casper@wearemorrow.nl
+          AMS_OFFSET: "+02:00"
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '' }}
+      - name: Bewaar PDF (bij dry-run)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hubspot-weekrapport
+          path: "*.pdf"
