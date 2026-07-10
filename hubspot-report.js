@@ -100,12 +100,13 @@ async function metrics(win) {
   const now = Date.now(); const veroudering = { '0-2': 0, '3-5': 0, '>5': 0 };
   for (const l of openBeltaken) { const d = (now - ts(P(l)[BELTAKEN_ENTERED])) / 864e5; if (d <= 2) veroudering['0-2']++; else if (d <= 5) veroudering['3-5']++; else veroudering['>5']++; }
 
-  // per-owner aggregatie
-  const perOwner = {}; for (const o of AM_ORDER) perOwner[o] = { nieuw: 0, gebeld: 0, afspraken: 0, offertes: 0, offerteEur: 0, gewonnen: 0, gewonnenEur: 0 };
-  const add = (rows, key, val = () => 1) => { for (const r of rows) { const o = P(r).hubspot_owner_id; if (perOwner[o]) perOwner[o][key] += val(r); } };
+  // per-owner aggregatie (owners buiten de AM-lijst of zonder eigenaar → "_overig")
+  const perOwner = {}; for (const o of [...AM_ORDER, '_overig']) perOwner[o] = { nieuw: 0, gebeld: 0, afspraken: 0, offertes: 0, offerteEur: 0, gewonnen: 0, gewonnenEur: 0 };
+  const bucket = (id) => (perOwner[id] ? id : '_overig');
+  const add = (rows, key, val = () => 1) => { for (const r of rows) perOwner[bucket(P(r).hubspot_owner_id)][key] += val(r); };
   add(nieuwRows, 'nieuw'); add(gebeldRows, 'gebeld'); add(afspraakRows, 'afspraken');
-  for (const o of offerteVerstuurd) { const ow = P(o).hubspot_owner_id; if (perOwner[ow]) { perOwner[ow].offertes++; perOwner[ow].offerteEur += Number(P(o).bedrag) || 0; } }
-  for (const d of wonRows) { const ow = P(d).hubspot_owner_id; if (perOwner[ow]) { perOwner[ow].gewonnen++; perOwner[ow].gewonnenEur += Number(P(d).amount) || 0; } }
+  for (const o of offerteVerstuurd) { const b = perOwner[bucket(P(o).hubspot_owner_id)]; b.offertes++; b.offerteEur += Number(P(o).bedrag) || 0; }
+  for (const d of wonRows) { const b = perOwner[bucket(P(d).hubspot_owner_id)]; b.gewonnen++; b.gewonnenEur += Number(P(d).amount) || 0; }
 
   // offerte-funnel per status
   const funnel = {}; for (const o of offerteRows) { const s = P(o).status || 'Onbekend'; funnel[s] = (funnel[s] || 0) + 1; }
@@ -140,9 +141,12 @@ table.data{width:100%;border-collapse:collapse;font-size:10.5px}table.data th{te
 
 function reportHtml(m, win, goals) {
   const t = m.team;
-  const rows = AM_ORDER.map((o) => {
+  const ov = m.perOwner._overig;
+  const heeftOverig = ov && (ov.nieuw + ov.gebeld + ov.afspraken + ov.offertes + ov.gewonnen) > 0;
+  const rows = [...AM_ORDER, ...(heeftOverig ? ['_overig'] : [])].map((o) => {
     const p = m.perOwner[o];
-    return `<tr><td>${esc(OWNERS[o])}</td><td>${p.nieuw}</td><td>${p.gebeld}</td><td>${p.afspraken}</td><td>${p.offertes} · ${eur(p.offerteEur)}</td><td>${p.gewonnen} · ${eur(p.gewonnenEur)}</td></tr>`;
+    const naam = o === '_overig' ? '<i style="color:#888;font-style:normal">Niet toegewezen</i>' : esc(OWNERS[o]);
+    return `<tr><td>${naam}</td><td>${p.nieuw}</td><td>${p.gebeld}</td><td>${p.afspraken}</td><td>${p.offertes} · ${eur(p.offerteEur)}</td><td>${p.gewonnen} · ${eur(p.gewonnenEur)}</td></tr>`;
   }).join('');
   const funnelOrder = ['Concept', 'Verstuurd', 'Bekeken', 'Geaccepteerd', 'Verlopen'];
   const funnelRows = funnelOrder.filter((s) => m.funnel[s]).map((s) => `<tr><td>${s}</td><td>${m.funnel[s]}</td></tr>`).join('') || '<tr><td>Geen offertes deze periode</td><td>0</td></tr>';
@@ -174,7 +178,7 @@ function reportHtml(m, win, goals) {
       </tr></table>
     </div>
 
-    <div class="card"><div class="ctitle">Leaderboard per accountmanager</div>
+    <div class="card"><div class="ctitle">Leaderboard per accountmanager</div>${heeftOverig ? '<div class="csub">Records zonder eigenaar in HubSpot (bijv. offertes uit de offertebouwer) vallen onder "Niet toegewezen".</div>' : ''}
       <table class="data"><thead><tr><th>Accountmanager</th><th>Nieuw</th><th>Gebeld</th><th>Afspraken</th><th>Offertes (# · €)</th><th>Gewonnen (# · €)</th></tr></thead><tbody>${rows}</tbody></table>
     </div>
 
