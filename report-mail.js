@@ -35,7 +35,17 @@ const dom = (e) => (e || '').split('@')[1] || 'onbekend';
 
 // ---- periode ----
 function ymd(daysAgo) { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Amsterdam' }).format(Date.now() - daysAgo * 864e5); }
+function ymParts(daysAgo) { const [y, m, d] = ymd(daysAgo).split('-').map(Number); return { y, m, d }; }
+function monthStartTs(y, m) { return ts(`${y}-${String(m).padStart(2, '0')}-01T00:00:00${OFF}`); }
 function window_() {
+  if (PERIOD === 'monthly') {
+    // vorige volledige kalendermaand (Amsterdam)
+    const { y, m } = ymParts(0);
+    const end = monthStartTs(y, m);
+    const py = m === 1 ? y - 1 : y, pm = m === 1 ? 12 : m - 1;
+    const start = monthStartTs(py, pm);
+    return { start, end, word: 'vorige maand', label: MAAND[pm - 1] + ' ' + py };
+  }
   if (PERIOD === 'weekly') {
     // vorige volledige week ma–zo (Amsterdam)
     const todayStr = ymd(0);
@@ -93,6 +103,19 @@ async function getReplies(from, to, users, campMap) {
   return out;
 }
 
+const keyOfReply = (r) => r.leadId || (r.leadEmail || '').toLowerCase() || (r.fromEmail || '').toLowerCase() || r.contactId || r._id;
+function loadGoals() { try { return JSON.parse(fs.readFileSync('./outreach-goals.json', 'utf8')); } catch { return {}; } }
+async function windowCounts(from, to, users, campMap) {
+  const acts = await getActivities(from, to);
+  const sent = acts.filter((a) => String(a.type).toLowerCase() === 'emailssent').length;
+  const bounced = acts.filter((a) => String(a.type).toLowerCase() === 'emailsbounced').length;
+  const reps = await getReplies(from, to, users, campMap);
+  const byLead = new Map();
+  for (const r of reps) { const k = keyOfReply(r); if (!k) continue; const e = byLead.get(k) || { interest: 0 }; e.interest = Math.max(e.interest, r.aiLeadInterestScore || 0); byLead.set(k, e); }
+  const leads = [...byLead.values()];
+  return { sent, bounced, uniek: leads.length, positief: leads.filter((e) => e.interest >= 0.5).length };
+}
+
 async function metrics(win) {
   const senders = await lemGet('/team/senders');
   const users = [...new Set(senders.map((s) => s.userId))];
@@ -124,32 +147,82 @@ async function metrics(win) {
   const replyLeadsPerCampagne = {}; for (const e of leads) { const k = e.campaign || '—'; replyLeadsPerCampagne[k] = (replyLeadsPerCampagne[k] || 0) + 1; }
   const perStep = {}; for (const e of leads) { const k = (e.step ?? '?'); perStep[k] = (perStep[k] || 0) + 1; }
   const seg = { pos: 0, twijfel: 0, niet: 0 }; for (const e of leads) { if (e.interest >= 0.5) seg.pos++; else if (e.interest >= 0.2) seg.twijfel++; else seg.niet++; }
+  // 7-daagse baseline (alleen dagrapport): gemiddelde per dag over de 7 dagen vóór gisteren
+  let base = null;
+  if (PERIOD === 'daily') {
+    const c = await windowCounts(win.start - 7 * 864e5, win.start, users, campMap);
+    base = { sent: c.sent / 7, bounced: c.bounced / 7, uniek: c.uniek / 7 };
+  }
+  // maanddoelen: dag/week = huidige maand tot nu; maand = de rapportmaand (volledig)
+  let goals = null;
+  const G = loadGoals();
+  let mk, gFrom, gTo, dayNow, daysInMonth, paceFrac, monthIdx;
+  if (PERIOD === 'monthly') {
+    const { y, m } = ymParts(0); const py = m === 1 ? y - 1 : y, pm = m === 1 ? 12 : m - 1;
+    mk = `${py}-${String(pm).padStart(2, '0')}`; gFrom = win.start; gTo = win.end;
+    monthIdx = pm - 1; daysInMonth = new Date(py, pm, 0).getDate(); dayNow = daysInMonth; paceFrac = 1;
+  } else {
+    const { y, m, d } = ymParts(0);
+    mk = `${y}-${String(m).padStart(2, '0')}`; gFrom = monthStartTs(y, m); gTo = Date.now();
+    monthIdx = m - 1; daysInMonth = new Date(y, m, 0).getDate(); dayNow = d; paceFrac = d / daysInMonth;
+  }
+  if (G[mk]) {
+    const g = G[mk];
+    const w = await windowCounts(gFrom, gTo, users, campMap);
+    goals = { month: monthIdx, dayNow, daysInMonth, paceFrac,
+      contacten: g.contacten, response: g.response, positief: g.positief, deliverability: g.deliverability,
+      mtd: { contacten: w.sent, response: w.sent ? 100 * w.uniek / w.sent : 0, positief: w.sent ? 100 * w.positief / w.sent : 0, deliverability: w.sent ? 100 - 100 * w.bounced / w.sent : 0 } };
+  }
   return { sent: sent.length, bounced: bounced.length, replies, uniek: leads.length,
     linkedin: leads.filter((e) => e.linkedin).length,
     cc: leads.filter((e) => e.cc).length,
     positief: leads.filter((e) => e.interest >= 0.5).length,
-    leads, seg, perStep, byDomain, perCampagne, replyLeadsPerCampagne, perDag };
+    base, goals, leads, seg, perStep, byDomain, perCampagne, replyLeadsPerCampagne, perDag };
 }
 
 // ---- HTML-rapport (huisstijl) ----
 function logoUri() { for (const p of ['./morrow_logo.png', './assets/morrow_logo.png']) { try { return 'data:image/png;base64,' + fs.readFileSync(p).toString('base64'); } catch {} } return ''; }
 const CSS = `@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&display=swap');
-@page{size:A4;margin:15mm 14mm}*{box-sizing:border-box}html,body{background:#fafaf5}body{font-family:'Manrope',Arial,Helvetica,sans-serif;color:#0a0a14;font-size:11px;line-height:1.4;margin:0}
+@page{size:A4;margin:15mm 14mm}*{box-sizing:border-box}html,body{background:#ffffff}body{font-family:'Manrope',Arial,Helvetica,sans-serif;color:#0a0a14;font-size:11px;line-height:1.4;margin:0}
 .logo{height:30px;margin:0 0 10px}h1{font-size:20px;margin:0 0 2px;color:#4b0028;font-weight:800}.sub{color:#666;font-size:11px;margin-bottom:12px}
 .card{border:1px solid #e6e6e8;border-radius:10px;padding:14px;margin-bottom:14px;background:#fff;page-break-inside:avoid}.ctitle{font-size:13px;font-weight:800;margin:0 0 2px;color:#4b0028}.csub{font-size:10px;color:#777;margin-bottom:10px}
-table.tiles{width:100%;border-collapse:separate;border-spacing:8px 0}table.tiles td{border:1px solid #ececee;border-radius:8px;padding:9px;vertical-align:top}
-.tlabel{color:#777;font-size:9.5px;margin-bottom:4px}.tval{font-size:18px;font-weight:bold}.tval .u{font-size:10px;color:#888;font-weight:bold}.delta{font-size:9.5px;margin-top:3px}.flat{color:#888}
-table.funnel{width:100%;border-collapse:separate;border-spacing:3px 0;margin-top:2px}table.funnel td.step{border:1px solid #ececee;border-radius:8px;padding:8px 4px;text-align:center}table.funnel td.win{border-color:#1a8f4c;background:#eaf6ee}table.funnel td.arr{text-align:center;color:#b0b0b6;font-size:9px;width:30px}.fn{font-size:15px;font-weight:bold}.fl{font-size:8.5px;color:#777}.arr b{display:block;color:#8a8a90;font-size:8.5px}
+table.tiles{width:100%;border-collapse:collapse;table-layout:fixed}table.tiles td{vertical-align:top;padding:0 4px}table.tiles td:first-child{padding-left:0}table.tiles td:last-child{padding-right:0}.tile{border:1px solid #ececee;border-radius:8px;padding:9px;height:100%}
+.tlabel{color:#777;font-size:9.5px;margin-bottom:4px}.tval{font-size:18px;font-weight:bold}.tval .u{font-size:10px;color:#888;font-weight:bold}.delta{font-size:9px;margin-top:4px;font-weight:bold}.flat{color:#999}.up{color:#1a8f4c}.down{color:#c0392b}
+table.funnel{width:100%;border-collapse:collapse;margin-top:2px;table-layout:fixed}table.funnel td.step{padding:0 3px;vertical-align:top}table.funnel td.arr{text-align:center;color:#b0b0b6;font-size:9px;width:5%}.stepbox{border:1px solid #ececee;border-radius:8px;padding:8px 4px;text-align:center}.stepbox.win{border-color:#1a8f4c;background:#eaf6ee}.fn{font-size:15px;font-weight:bold}.fl{font-size:8.5px;color:#777}.arr b{display:block;color:#8a8a90;font-size:8.5px}
 table.data{width:100%;border-collapse:collapse;font-size:10.5px}table.data td{padding:7px 5px;border-bottom:1px solid #f0f0f2}table.data td:not(:first-child){text-align:right}
 .cols{width:100%;border-collapse:separate;border-spacing:14px 0}.cols>tbody>tr>td{vertical-align:top;width:50%}.cols>tbody>tr>td>.card{height:100%;margin-bottom:0}.lab{font-size:10px;font-weight:bold;color:#666;margin:0 0 6px}.mt{margin-top:14px}
 .foot{font-size:9px;color:#999;border-top:1px solid #eee;padding-top:9px;margin-top:6px}
 .days td{text-align:center;vertical-align:bottom;padding:0 3px}.dbar{width:70%;margin:0 auto;background:#3a7afe;border-radius:4px 4px 0 0}.dbar.best{background:#1a8f4c}.dbar.z{background:#e0e0e2;height:2px}.dnum{font-size:10px;font-weight:bold}.dlab{font-size:8.5px;color:#888}
 .bar{height:13px;border-radius:7px;overflow:hidden;background:#ececee}.bar span{display:block;height:100%;float:left}.s1{background:#2e7d5b}.s2{background:#9aa5b1}.s3{background:#d98a3d}
 .legend span{display:inline-block;font-size:10px;color:#5b5b60;margin:8px 12px 0 0}.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px}
-.bad{color:#c0392b;font-weight:bold}.good{color:#1a8f4c;font-weight:bold}`;
+.bad{color:#c0392b;font-weight:bold}.good{color:#1a8f4c;font-weight:bold}
+.goal{margin-bottom:12px}.grow{font-size:11px;margin-bottom:4px}.grow b{float:right}.gsub{font-size:9px;color:#8a8a90;margin-top:3px}
+.prog{height:9px;border-radius:5px;background:#ececee;overflow:hidden;position:relative}.prog span{display:block;height:100%;background:#1a8f4c;border-radius:5px}.prog span.warn{background:#e0912a}.prog span.bad{background:#c0392b}.pace{position:absolute;top:-2px;bottom:-2px;width:2px;background:#4b0028;opacity:.55}`;
 
 function nf(n) { return Number(n).toLocaleString('nl-NL'); }
 function pct(n, d) { return d ? (100 * n / d).toFixed(1).replace('.', ',') : '0'; }
+const MAAND = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+function goalBar(label, cur, goal, isPct, dayFrac, isVolume) {
+  if (goal == null || !(goal > 0)) return '';
+  const fill = Math.min(100, Math.round(cur / goal * 100));
+  const fmt = (v) => isPct ? (Math.round(v * 10) / 10).toString().replace('.', ',') + '%' : nf(Math.round(v));
+  // verwacht nu: volume-doel loopt op met de maand; rate-doel is constant het doel
+  const expected = isVolume ? goal * (dayFrac ?? 1) : goal;
+  const ratio = cur / (expected > 0 ? expected : goal);
+  const cls = ratio >= 1 ? '' : (ratio >= 0.85 ? 'warn' : 'bad');
+  const status = ratio >= 1 ? 'op schema' : (ratio >= 0.85 ? 'net achter' : 'achter');
+  const marker = isVolume ? `<span class="pace" style="left:${Math.min(100, Math.round((dayFrac ?? 1) * 100))}%"></span>` : '';
+  return `<div class="goal"><div class="grow">${label} <b>${fmt(cur)} / ${fmt(goal)}</b></div>
+    <div class="prog"><span class="${cls}" style="width:${fill}%"></span>${marker}</div>
+    <div class="gsub">verwacht nu: ${fmt(expected)} · ${status}</div></div>`;
+}
+function trend(val, avg, goodUp) {
+  if (avg == null || !(avg > 0)) return '<div class="delta flat">&nbsp;</div>';
+  const d = Math.round((val - avg) / avg * 100);
+  if (d === 0) return '<div class="delta flat">= 7d-gem.</div>';
+  const up = d > 0, good = goodUp ? up : !up;
+  return `<div class="delta ${good ? 'up' : 'down'}">${up ? '▲' : '▼'} ${Math.abs(d)}% vs 7d</div>`;
+}
 
 function reportHtml(m, win) {
   const reacties = m.uniek;
@@ -171,29 +244,29 @@ function reportHtml(m, win) {
   }).join('') || '<tr><td>—</td><td></td></tr>';
 
   return `<!DOCTYPE html><html lang="nl"><head><meta charset="utf-8"><style>${CSS}</style></head><body>
-    <img src="${logoUri()}" class="logo"><h1>Lemlist · Outreach ${PERIOD === 'weekly' ? 'weekrapport' : 'dagrapport'}</h1>
+    <img src="${logoUri()}" class="logo"><h1>Lemlist · Outreach ${PERIOD === 'monthly' ? 'maandrapport' : (PERIOD === 'weekly' ? 'weekrapport' : 'dagrapport')}</h1>
     <div class="sub">${win.label} &nbsp;·&nbsp; echte data</div>
 
     <div class="card"><div class="ctitle">Outreach-funnel</div><div class="csub">E-mail + LinkedIn · reacties geteld per unieke persoon</div>
       <table class="funnel"><tr>
-        <td class="step"><div class="fn">${nf(m.sent)}</div><div class="fl">Verzonden</div></td>
+        <td class="step"><div class="stepbox"><div class="fn">${nf(m.sent)}</div><div class="fl">Verzonden</div></div></td>
         <td class="arr">&#9654;</td>
-        <td class="step"><div class="fn">${nf(m.sent)}</div><div class="fl">Nieuwe contacten</div></td>
+        <td class="step"><div class="stepbox"><div class="fn">${nf(m.sent)}</div><div class="fl">Nieuwe contacten</div></div></td>
         <td class="arr"><b>${convReact}%</b>&#9654;</td>
-        <td class="step"><div class="fn">${reacties}</div><div class="fl">Reacties</div></td>
+        <td class="step"><div class="stepbox"><div class="fn">${reacties}</div><div class="fl">Reacties</div></div></td>
         <td class="arr">&#9654;</td>
-        <td class="step win"><div class="fn">${m.positief}</div><div class="fl">Positief</div></td>
+        <td class="step"><div class="stepbox win"><div class="fn">${m.positief}</div><div class="fl">Positief</div></div></td>
       </tr></table>
     </div>
 
-    <div class="card"><div class="ctitle">Kerncijfers</div>
+    <div class="card"><div class="ctitle">Kerncijfers${m.base ? ' <span style="font-weight:normal;color:#888;font-size:10px">· pijl = t.o.v. 7-daags gemiddelde</span>' : ''}</div>
       <table class="tiles"><tr>
-        <td style="width:16.6%"><div class="tlabel">Mails verzonden</div><div class="tval">${nf(m.sent)}</div></td>
-        <td style="width:16.6%"><div class="tlabel">Reacties (uniek)</div><div class="tval">${reacties} <span class="u">·${convReact}%</span></div></td>
-        <td style="width:16.6%"><div class="tlabel">w.v. LinkedIn</div><div class="tval">${m.linkedin}</div></td>
-        <td style="width:16.6%"><div class="tlabel">w.v. via CC</div><div class="tval">${m.cc}</div></td>
-        <td style="width:16.6%"><div class="tlabel">Bounces</div><div class="tval">${nf(m.bounced)} <span class="u">·${br}%</span></div></td>
-        <td style="width:16.6%"><div class="tlabel">Deliverability</div><div class="tval">${dl}%</div></td>
+        <td><div class="tile"><div class="tlabel">Mails verzonden</div><div class="tval">${nf(m.sent)}</div>${m.base ? trend(m.sent, m.base.sent, true) : ''}</div></td>
+        <td><div class="tile"><div class="tlabel">Reacties (uniek)</div><div class="tval">${reacties} <span class="u">·${convReact}%</span></div>${m.base ? trend(reacties, m.base.uniek, true) : ''}</div></td>
+        <td><div class="tile"><div class="tlabel">w.v. LinkedIn</div><div class="tval">${m.linkedin}</div>${m.base ? '<div class="delta flat">&nbsp;</div>' : ''}</div></td>
+        <td><div class="tile"><div class="tlabel">w.v. via CC</div><div class="tval">${m.cc}</div>${m.base ? '<div class="delta flat">&nbsp;</div>' : ''}</div></td>
+        <td><div class="tile"><div class="tlabel">Bounces</div><div class="tval">${nf(m.bounced)} <span class="u">·${br}%</span></div>${m.base ? trend(m.bounced, m.base.bounced, false) : ''}</div></td>
+        <td><div class="tile"><div class="tlabel">Deliverability</div><div class="tval">${dl}%</div>${m.base ? '<div class="delta flat">&nbsp;</div>' : ''}</div></td>
       </tr></table>
     </div>
 
@@ -212,6 +285,20 @@ function reportHtml(m, win) {
         <table class="data">${domr}</table>
       </div></td>
     </tr></table>
+
+    ${m.goals ? `<div class="card"><div class="ctitle">Maanddoelen · ${MAAND[m.goals.month]}</div>
+      <div class="csub">Maand-tot-nu vs. je doel voor deze maand${m.goals.paceFrac != null ? ` · dag ${m.goals.dayNow} van ${m.goals.daysInMonth} (paars streepje = verwachte stand nu)` : ''}</div>
+      <table class="cols"><tr>
+        <td>
+          ${goalBar('Contacten gemaild', m.goals.mtd.contacten, m.goals.contacten, false, m.goals.paceFrac, true)}
+          ${goalBar('Positieve reacties', m.goals.mtd.positief, m.goals.positief, true, null, false)}
+        </td>
+        <td>
+          ${goalBar('Response rate', m.goals.mtd.response, m.goals.response, true, null, false)}
+          ${goalBar('Deliverability', m.goals.mtd.deliverability, m.goals.deliverability, true, null, false)}
+        </td>
+      </tr></table>
+    </div>` : ''}
 
     <div class="foot">Automatisch gegenereerd · reacties per unieke persoon (incl. CC &amp; LinkedIn) · Morrow.</div></body></html>`;
 }
@@ -251,7 +338,8 @@ async function main() {
   console.log(`${PERIOD} (${win.word}, ${win.label}): verzonden ${m.sent}, bounces ${m.bounced}, reply-events ${m.replies.length}, unieke reacties ${m.uniek} (LinkedIn ${m.linkedin}, CC ${m.cc}).`);
 
   const pdf = await htmlToPdf(reportHtml(m, win));
-  const fname = `Lemlist_${PERIOD === 'weekly' ? 'week' : 'dag'}_${ymd(PERIOD === 'weekly' ? 7 : 1)}.pdf`;
+  const kind = PERIOD === 'monthly' ? 'maand' : (PERIOD === 'weekly' ? 'week' : 'dag');
+  const fname = `Lemlist_${kind}_${ymd(1)}.pdf`;
   const punten = aandachtspunten(m);
   const body = `<div style="font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;line-height:1.6;max-width:560px;">
     <p>Hé boss,</p>
@@ -261,7 +349,7 @@ async function main() {
     <p style="color:#999;font-size:12px;margin-top:22px;">Automatisch · Morrow.</p></div>`;
 
   if (DRY || !SMTP_PASS) { fs.writeFileSync(fname, pdf); console.log(`(DRY of geen SMTP_PASS) — PDF lokaal opgeslagen als ${fname}, geen mail.`); return; }
-  await gmailSend({ from: MAIL_FROM, to: MAIL_TO, subject: `Lemlist ${PERIOD === 'weekly' ? 'weekrapport' : 'dagrapport'} — ${win.label}`, html: body, attachment: { filename: fname, buffer: Buffer.from(pdf) } });
+  await gmailSend({ from: MAIL_FROM, to: MAIL_TO, subject: `Lemlist ${kind}rapport — ${win.label}`, html: body, attachment: { filename: fname, buffer: Buffer.from(pdf) } });
   console.log(`Mail met bijlage verstuurd naar ${MAIL_TO}.`);
 }
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
