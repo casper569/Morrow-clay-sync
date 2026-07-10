@@ -1,7 +1,7 @@
-name: Lemlist weekrapport (mail)
+name: Lemlist maandrapport (mail)
 on:
   schedule:
-    - cron: "0 6 * * 1"          # elke maandag 06:00 UTC ≈ 08:00 Amsterdam
+    - cron: "0 6 1 * *"          # de 1e van de maand, 06:00 UTC ≈ 08:00 Amsterdam
   workflow_dispatch:
     inputs:
       dry_run:
@@ -22,20 +22,20 @@ jobs:
           path: ~/.cache/puppeteer
           key: puppeteer-${{ runner.os }}
       - run: npm install --no-audit --no-fund
-      - name: Bouw en mail weekrapport
+      - name: Bouw en mail maandrapport
         run: node report-mail.js
         env:
-          PERIOD: weekly
+          PERIOD: monthly
           LEMLIST_API_KEY: ${{ secrets.LEMLIST_API_KEY }}
           SMTP_USER: reports.morrow@gmail.com
           SMTP_PASS: ${{ secrets.SMPT_PASS }}
           MAIL_FROM: reports.morrow@gmail.com
           MAIL_TO: casper@wearemorrow.nl
-          AMS_OFFSET: "+02:00"     # zomertijd; zet op +01:00 in de winter
+          AMS_OFFSET: "+02:00"
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '' }}
       - name: Bewaar PDF (bij dry-run)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         uses: actions/upload-artifact@v4
         with:
-          name: lemlist-weekrapport
+          name: lemlist-maandrapport
           path: "*.pdf"
