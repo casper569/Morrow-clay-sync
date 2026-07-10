@@ -27,9 +27,9 @@ jobs:
         env:
           PERIOD: daily
           LEMLIST_API_KEY: ${{ secrets.LEMLIST_API_KEY }}
-          SMTP_USER: casper@bymorrow.nl
+          SMTP_USER: reports.morrow@gmail.com
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          MAIL_FROM: casper@bymorrow.nl
+          MAIL_FROM: reports.morrow@gmail.com
           MAIL_TO: casper@wearemorrow.nl
           AMS_OFFSET: "+02:00"     # zomertijd; zet op +01:00 in de winter
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '' }}
