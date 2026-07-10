@@ -77,6 +77,25 @@ async function hsSearch(objectType, filterGroups, properties) {
   }
   return out;
 }
+async function hsAssoc(fromType, id, toType) {
+  const res = await fetch(`https://api.hubapi.com/crm/v4/objects/${fromType}/${id}/associations/${toType}?limit=1`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  if (!res.ok) return null;
+  const j = await res.json();
+  return (j.results && j.results[0]) ? String(j.results[0].toObjectId) : null;
+}
+async function ownerOf(objType, id) {
+  const res = await fetch(`https://api.hubapi.com/crm/v3/objects/${objType}/${id}?properties=hubspot_owner_id`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  if (!res.ok) return null;
+  const j = await res.json();
+  return (j.properties && j.properties.hubspot_owner_id) || null;
+}
+// Offertes hebben zelf geen eigenaar → leid af via de eigenaar van de GEKOPPELDE DEAL.
+// (Contact-eigenaar is onbetrouwbaar bij meerdere bedrijven in één HubSpot.)
+async function resolveOfferteOwner(o) {
+  const did = await hsAssoc(OFFERTES_OBJ, o.id, 'deals');
+  if (did) { const ow = await ownerOf('deals', did); if (ow) return ow; }
+  return o.properties.hubspot_owner_id || null;
+}
 const between = (prop, from, to) => ({ propertyName: prop, operator: 'BETWEEN', value: String(from), highValue: String(to) });
 const byOwner = () => Object.fromEntries(AM_ORDER.map((o) => [o, 0]));
 function tally(rows, into, val = () => 1) { for (const r of rows) { const o = r.properties.hubspot_owner_id; if (into[o] != null) into[o] += val(r); else (into._overig = (into._overig || 0) + val(r)); } }
@@ -95,6 +114,7 @@ async function metrics(win) {
   const offerteRows = (await hsSearch(OFFERTES_OBJ, [{ filters: [between('hs_createdate', win.start, win.end)] }], ['naam', 'status', 'bedrag', 'hubspot_owner_id']))
     .filter((o) => !/test/i.test(P(o).naam || ''));
   const offerteVerstuurd = offerteRows.filter((o) => OFFERTE_VOORBIJ_CONCEPT.includes(P(o).status));
+  for (const o of offerteVerstuurd) o._owner = await resolveOfferteOwner(o); // eigenaar via gekoppeld contact/deal/lead
   // Beltaken-veroudering (open leads nu in Beltaken)
   const openBeltaken = await hsSearch('leads', [{ filters: [{ propertyName: 'hs_pipeline', operator: 'EQ', value: LEADS_PIPELINE }, { propertyName: 'hs_pipeline_stage', operator: 'EQ', value: BELTAKEN_STAGE }] }], ['hubspot_owner_id', BELTAKEN_ENTERED]);
   const now = Date.now(); const veroudering = { '0-2': 0, '3-5': 0, '>5': 0 };
@@ -105,7 +125,7 @@ async function metrics(win) {
   const bucket = (id) => (perOwner[id] ? id : '_overig');
   const add = (rows, key, val = () => 1) => { for (const r of rows) perOwner[bucket(P(r).hubspot_owner_id)][key] += val(r); };
   add(nieuwRows, 'nieuw'); add(gebeldRows, 'gebeld'); add(afspraakRows, 'afspraken');
-  for (const o of offerteVerstuurd) { const b = perOwner[bucket(P(o).hubspot_owner_id)]; b.offertes++; b.offerteEur += Number(P(o).bedrag) || 0; }
+  for (const o of offerteVerstuurd) { const b = perOwner[bucket(o._owner)]; b.offertes++; b.offerteEur += Number(P(o).bedrag) || 0; }
   for (const d of wonRows) { const b = perOwner[bucket(P(d).hubspot_owner_id)]; b.gewonnen++; b.gewonnenEur += Number(P(d).amount) || 0; }
 
   // offerte-funnel per status
